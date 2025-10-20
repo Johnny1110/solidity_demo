@@ -98,7 +98,7 @@ filter = {
 
 So in Token Vault case: we can search log by this:
 
-```
+```solidity
 event Deposit(
     address indexed depositor,  // ✓ Can find "all deposits by Alice"
     address indexed token,      // ✓ Can find "all USDC deposits"
@@ -157,7 +157,7 @@ function batchAddTokensToWhitelist(address[] calldata tokens) external onlyOwner
 
 ### The Four Data Locations in Solidity
 
-```
+```solidity
 // 1. STORAGE - Permanent blockchain storage
 mapping(address => uint) public balances;  // Always in storage
 
