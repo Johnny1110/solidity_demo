@@ -8,11 +8,11 @@
 
 This is a token vault contract, user can deposit and withdraw token by it.
 
-## Important:
+## About event `indexed`:
 
 ### What Does indexed Mean?
 
-```sol
+```solidity
 event Deposit(
         address indexed depositor,
         address indexed token,
@@ -36,7 +36,7 @@ indexed is a critical modifier that changes how event parameters are stored and 
 
 When an event is emitted, it creates a log entry with two components:
 
-```sol
+```solidity
 Log Entry = {
     topics: [],  // Up to 4 indexed items (searchable/filterable)
     data: ""     // Non-indexed items (just stored, not searchable)
@@ -47,7 +47,7 @@ Log Entry = {
 
 **Indexed vs Non-Indexed**
 
-```sol
+```solidity
 event Transfer(
     address indexed from,    // → Goes to topics[1]
     address indexed to,      // → Goes to topics[2]
@@ -130,4 +130,100 @@ const logs = await web3.eth.getPastLogs(filter);
 // Ethers.js - more user-friendly
 const filter = token.filters.Transfer(fromAddress, null);  // Auto-handles padding!
 const logs = await token.queryFilter(filter);
+```
+
+<br>
+<br>
+<br>
+<br>
+
+### What does `calldata` means?
+
+```solidity
+function batchAddTokensToWhitelist(address[] calldata tokens) external onlyOwner {
+    for (uint i = 0; i < tokens.length; i++) {
+        require(tokens[i].code.length > 0, "Not a valid contract");
+        require(!whitelistedTokens[tokens[i]], "Token already whitelisted");
+        require(IERC20(tokens[i]).totalSupply() > 0, "Invalid token address");
+        whitelistedTokens[tokens[i]] = true;
+        emit TokenWhitelisted(tokens[i]);
+    }
+}
+```
+
+`calldata` is one of the most important concepts for gas optimization in Solidity. 
+
+<br>
+
+### The Four Data Locations in Solidity
+
+```
+// 1. STORAGE - Permanent blockchain storage
+mapping(address => uint) public balances;  // Always in storage
+
+// 2. MEMORY - Temporary, exists during function execution
+function process(uint[] memory data) { }
+
+// 3. CALLDATA - Read-only, exists during external function calls
+function process(uint[] calldata data) external { }
+
+// 4. STACK - Local variables (max 16 slots)
+function example() {
+    uint256 x = 5;  // Stack variable
+}
+```
+
+Calldata is the actual bytes sent with a transaction. It's:
+
+* Read-only (immutable)
+* Non-persistent (exists only during the call)
+* The cheapest data location for function parameters
+* External functions only (not available for internal/private)
+
+
+<br>
+
+**When to Use Each Data Location?**
+
+1. Use `calldata` when:
+
+```sol
+// Read-only array/string parameters in external functions
+function validateTokens(address[] calldata tokens) external view
+
+// Passing data to other functions without modification
+function forward(bytes calldata data) external
+
+// Large arrays that you're only reading
+function sumLargeArray(uint256[] calldata numbers) external pure
+```
+
+<br>
+
+2. Use memory when:
+
+```solidity
+// Need to modify the array
+function sortArray(uint256[] memory arr) public pure returns (uint256[] memory)
+
+// Building new arrays
+function createArray() public pure returns (uint256[] memory) {
+    uint256[] memory newArray = new uint256[](10);
+    return newArray;
+}
+
+// Internal/private functions (can't use calldata)
+function internalProcess(uint256[] memory data) internal
+```
+
+<br>
+
+3. Use `storage` when:
+
+```solidity
+// Permanent state variables
+uint256[] public storedArray;
+
+// Passing storage references (saves gas!)
+function updateStorageArray(uint256[] storage arr) internal
 ```
