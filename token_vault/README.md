@@ -187,7 +187,7 @@ Calldata is the actual bytes sent with a transaction. It's:
 
 1. Use `calldata` when:
 
-```sol
+```solidity
 // Read-only array/string parameters in external functions
 function validateTokens(address[] calldata tokens) external view
 
