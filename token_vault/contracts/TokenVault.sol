@@ -13,9 +13,27 @@ import "./IERC20.sol";
  * - Separate concerns (tokens stay in vault, not in complex business logic)
  */
 contract TokenVault {
-    
+
+    // ========== Constants ==========
+
     /**
-     * STATE VARIABLES
+     * BASIS POINTS explanation:
+     * 1 basis point = 0.01%
+     * 100 basis points = 1%
+     * 10000 basis points = 100%
+     * 
+     * Why basis points instead of percentage?
+     * - No decimals in Solidity (uint only)
+     * - More precise than whole percentages
+     * - Industry standard in finance
+     */
+    uint256 public constant BASIS_POINTS = 10000;
+    uint256 public constant MAX_FEE = 1000; // 10% maximum fee (protection)
+
+    
+    // ========== State Variables ==========
+
+    /**
      * 
      * Why mapping(address => mapping(address => uint256))?
      * - First address: depositor's address
@@ -44,7 +62,39 @@ contract TokenVault {
      */
 
     address public immutable owner;
-    
+
+    /**
+     * Fee configuration per token
+     * Why per-token fees?
+     * - Stablecoins might have lower fees
+     * - Volatile tokens might have higher fees
+     * - New tokens might have promotional 0% fees
+     */
+    struct FeeConfig {
+        uint256 depositFeeBps; // Basis pointer for deposit
+        uint256 withdrawFeeBps; // Basis pointer for withdrawal
+        address feeRecipient; // Where fees are sent
+        bool exemptFromFees; // If true, no fees applied
+    } 
+
+    mapping(address => FeeConfig) public feeConfigs;
+    mapping(address => uint256) public feeDiscounts; // NFT ownership => discount in basis points
+
+
+    /**
+     * Default fee configuration
+     * Applied to tokens without specific configuration
+     */
+    FeeConfig public defaultFeeConfig;
+
+    /**
+     * Track collected fees separately
+     * Why separate tracking?
+     * - Clear accounting
+     * - Can't accidentally withdraw user deposits
+     * - Easy fee distribution
+     */
+    mapping(address => uint256) public collectedFees;
     
     /**
      * EVENTS
@@ -59,13 +109,35 @@ contract TokenVault {
     event Deposit(
         address indexed depositor,
         address indexed token,
-        uint256 amount
+        uint256 amountIn,
+        uint256 amountAfterFee,
+        uint256 fee
     );
     
     event Withdrawal(
         address indexed withdrawer,
         address indexed token,
+        uint256 amountRequested,
+        uint256 amountSent,
+        uint256 fee
+    );
+
+    event FeeConfigUpdated(
+        address indexed token,
+        uint256 depositFeeBps,
+        uint256 withdrawFeeBps,
+        address feeRecipient
+    );
+
+    event FeesCollected(
+        address indexed token,
+        address indexed recipient,
         uint256 amount
+    );
+    
+    event FeeDiscountSet(
+        address indexed user,
+        uint256 discountBps
     );
 
     /**
@@ -112,9 +184,82 @@ contract TokenVault {
      * - No time window where contract is ownerless
      * - Can't forget to set owner (common bug)
      */
-    constructor() {
+    constructor(address _defaultFeeRecipient) {
         owner = msg.sender;
+
+        defaultFeeConfig = FeeConfig({
+            depositFeeBps: 0, // 0%
+            withdrawFeeBps: 30, // 0.3%
+            feeRecipient: _defaultFeeRecipient,
+            exemptFromFees: false
+        });
     }
+    
+    // ========== Fee Calculation Helper ==========
+
+    /**
+     * Calculate fee for a given amount
+     * 
+     * CRITICAL: Rounding direction matters!
+     * - For deposits: Round fee UP (user gets less)
+     * - For withdrawals: Round fee UP (user gets less)
+     * - Always favor protocol over user for sustainability
+     * 
+     * Math explanation:
+     * fee = (amount * feeBps) / BASIS_POINTS
+     * 
+     * Example: 1000 tokens with 30 bps (0.3%) fee
+     * fee = (1000 * 30) / 10000 = 3 tokens
+     */
+    function calculateFee(uint256 amount, uint256 feeBps) public pure returns (uint256 fee, uint256 amountAfterFee) {
+        if (feeBps == 0) {
+            // zero fee case
+            return (0, amount);
+        }
+
+        /**
+         * SafeMath not needed in 0.8+ but let's be explicit about overflow
+         * Maximum: type(uint256).max * MAX_FEE / BASIS_POINTS
+         * This can't overflow in practice
+         */
+         fee = (amount * feeBps) / BASIS_POINTS;
+
+         /**
+         * Important: Check for underflow
+         * If fee >= amount, something is wrong
+         */
+         require(fee < amount, "Fee exceeds amount");
+         amountAfterFee = amount - fee;
+    }
+
+
+    /**
+     * Get effective fee for a user (considering discounts)
+     */
+    function getEffectiveFee(address user, address token, bool isDeposit) public view returns (uint256) {
+        // feeConfigs[token] will never be null, but check if feeRecipient is set.
+        FeeConfig memory config = feeConfigs[token].feeRecipient != address(0) ? feeConfigs[token] : defaultFeeConfig;
+
+        if (config.exemptFromFees) {
+            return 0;
+        }
+
+        uint256 baseFee = isDeposit ? config.depositFeeBps : config.withdrawFeeBps;
+        uint256 discount = feeDiscounts[user];
+
+        /**
+         * Apply discount
+         * If user has 5000 bps (50%) discount on 30 bps fee:
+         * effectiveFee = 30 - (30 * 5000 / 10000) = 15 bps
+         */
+         if (discount > 0) {
+            uint256 reduction = (baseFee * discount) / BASIS_POINTS;
+            baseFee = baseFee > reduction ? baseFee - reduction : 0;
+         }
+
+         return baseFee;
+    }
+
 
     // ========== Admin Functions ==========
 
@@ -154,6 +299,65 @@ contract TokenVault {
         require(totalDepositsPerToken[token] == 0, "Token is in deposits");
         IERC20(token).transfer(owner, amount);
     }
+
+    function setTokenFeeConfig(
+        address token, 
+        uint256 depositFeeBps, uint256 withdrawFeeBps, 
+        address feeRecipient, bool exemptFromFees) external onlyOwner {
+            require(depositFeeBps <= MAX_FEE, "Deposit fee too high");
+            require(withdrawFeeBps <= MAX_FEE, "Withdraw fee too high");
+            require(feeRecipient != address(0), "Invalid fee recipient");
+
+            feeConfigs[token] = FeeConfig({
+                depositFeeBps: depositFeeBps,
+                withdrawFeeBps: withdrawFeeBps,
+                feeRecipient: feeRecipient,
+                exemptFromFees: exemptFromFees
+            });
+
+            emit FeeConfigUpdated(token, depositFeeBps, withdrawFeeBps, feeRecipient);
+    }
+
+    function setUserFeeDiscount(
+        address user,
+        uint256 discountBps
+    ) external onlyOwner {
+        require(discountBps <= BASIS_POINTS, "Discount too high");
+        feeDiscounts[user] = discountBps;
+        emit FeeDiscountSet(user, discountBps);
+    }
+
+    function collectFees(address token) external onlyOwner {
+        uint256 amount = collectedFees[token];
+        require(amount > 0, "No fees to collect");
+
+        address recipient = feeConfigs[token].feeRecipient != address(0)
+            ? feeConfigs[token].feeRecipient
+            : defaultFeeConfig.feeRecipient;
+
+        // Reset collected fees before transfer to prevent reentrancy
+        collectedFees[token] = 0;
+
+        IERC20(token).transfer(recipient, amount);
+        emit FeesCollected(token, recipient, amount);
+    }
+
+    function batchCollectFees(address[] calldata tokens) external onlyOwner {
+        for (uint i = 0; i < tokens.length; i++) {
+            uint256 amount = collectedFees[tokens[i]];
+            if (amount > 0) {
+                address recipient = feeConfigs[tokens[i]].feeRecipient != address(0)
+                    ? feeConfigs[tokens[i]].feeRecipient
+                    : defaultFeeConfig.feeRecipient;
+
+                collectedFees[tokens[i]] = 0;
+                IERC20(tokens[i]).transfer(recipient, amount);
+                emit FeesCollected(tokens[i], recipient, amount);
+            }
+        }
+    }
+
+    // ========== Core Functions ==========
     
     /**
      * @dev Deposit tokens into the vault
@@ -171,6 +375,10 @@ contract TokenVault {
          * - Some tokens revert on 0 transfers anyway
          */
         require(amount > 0, "Amount must be greater than 0");
+
+        uint256 effectiveFeeBps = getEffectiveFee(msg.sender, token, true);
+
+        (uint256 fee, uint256 amountAfterFee) = calculateFee(amount, effectiveFeeBps);
         
         /**
          * CRITICAL: Why transferFrom BEFORE updating state?
@@ -189,15 +397,19 @@ contract TokenVault {
          * - Uses storage (expensive: 20,000 gas for new slot, 5,000 for update)
          * - Why += instead of =? Supports multiple deposits
          */
-        deposits[msg.sender][token] += amount;
-        totalDepositsPerToken[token] += amount;
+        deposits[msg.sender][token] += amountAfterFee;
+        totalDepositsPerToken[token] += amountAfterFee;
+
+        if (fee > 0) {
+            collectedFees[token] += fee;
+        }
         
         /**
          * Emit event for off-chain tracking
          * - Much cheaper than storing everything
          * - dApps can rebuild entire vault state from events
          */
-        emit Deposit(msg.sender, token, amount);
+        emit Deposit(msg.sender, token, amount, amountAfterFee, fee);
     }
     
     /**
@@ -211,6 +423,9 @@ contract TokenVault {
          * - Clear error message for users
          */
         require(deposits[msg.sender][token] >= amount, "Insufficient balance");
+
+        uint256 effectiveFeeBps = getEffectiveFee(msg.sender, token, false);
+        (uint256 fee, uint256 amountToSend) = calculateFee(amount, effectiveFeeBps);
         
         /**
          * CRITICAL: Update state BEFORE external call
@@ -229,6 +444,10 @@ contract TokenVault {
          */
         deposits[msg.sender][token] -= amount;
         totalDepositsPerToken[token] -= amount;
+
+        if (fee > 0) {
+            collectedFees[token] += fee;
+        }
         
         /**
          * "Interactions" - external calls go LAST
@@ -236,9 +455,9 @@ contract TokenVault {
          * - Returns bool, but many tokens don't follow this
          * - In production, use SafeERC20 library for compatibility
          */
-        IERC20(token).transfer(msg.sender, amount);
+        IERC20(token).transfer(msg.sender, amountToSend);
         
-        emit Withdrawal(msg.sender, token, amount);
+        emit Withdrawal(msg.sender, token, amount, amountToSend, fee);
     }
     
     /**
@@ -252,9 +471,25 @@ contract TokenVault {
     function getBalance(address user, address token) external view returns (uint256) {
         return deposits[user][token];
     }
+
+    function getWithdrawableAmount(address user, address token) external view returns (uint256) {
+        uint256 balance = deposits[user][token];
+        if (balance == 0) {
+            return 0;
+        }
+
+        uint256 effectiveFeeBps = getEffectiveFee(user, token, false);
+        (, uint256 amountToSend) = calculateFee(balance, effectiveFeeBps);
+        return amountToSend;
+    }
     
     function isTokenWhitelisted(address token) external view returns (bool) {
         return whitelistedTokens[token];
+    }
+
+
+    function getTVL(address token) external view returns (uint256) {
+        return totalDepositsPerToken[token];
     }
 
     /**
@@ -263,10 +498,6 @@ contract TokenVault {
      * 1. Emergency Pause:
      *    - What if a token has a critical bug?
      *    - Consider OpenZeppelin's Pausable pattern
-     * 
-     * 2. Token Whitelist:
-     *    - What if someone deposits a malicious token?
-     *    - Could maintain mapping(address => bool) allowedTokens
      * 
      * 3. Fees:
      *    - Vaults often take fees for maintenance
