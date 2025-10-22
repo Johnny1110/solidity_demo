@@ -187,7 +187,7 @@ contract VaultImplementation is VaultCore {
      * - Use tools like OpenZeppelin Upgrades plugin
      * - Test upgrade on testnet first
      */
-    function upgradeTo(address newImplementation) external onlyRole(UPGRADER_ROLE) {
+    function upgradeTo(address newImplementation) public onlyRole(UPGRADER_ROLE) {
         if (newImplementation == address(0)) revert ZeroAddress();
         if (newImplementation.code.length == 0) {
             revert InvalidImplementation(newImplementation);

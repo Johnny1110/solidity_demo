@@ -32,6 +32,22 @@ When you deposit tokens, you're actually changing the state of two contracts - t
 <br>
 <br>
 
+## 1.1 UUPS Pattern
+
+When I trying to revamp token vault project, I find out this design pattern.
+
+* 從零開始實現 UUPS proxy 系統
+* 安全地升級合約而不丟失數據
+* 處理真實世界的升級場景
+* 避免常見的 storage collision 陷阱
+* 理解為什麼大型 DeFi 協議選擇 UUPS
+
+[link](UUPS)
+
+<br>
+<br>
+
+
 ## 2. Dutch Auction Contract
 
 More complex state management and time-based logic.
